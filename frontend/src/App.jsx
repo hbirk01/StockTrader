@@ -3,11 +3,33 @@ import { useStocks, useCrypto } from './hooks/useStocks'
 import { TickerTape, Header } from './components/Header'
 import StocksTab from './components/StocksTab'
 import PortfolioTab from './components/PortfolioTab'
+import PoliticiansTab from './components/PoliticiansTab'
+import NewsTab from './components/NewsTab'
+import AIPicksTab from './components/AIPicksTab'
+import MyPortfolioTab from './components/MyPortfolioTab'
+import ScreenerTab from './components/ScreenerTab'
+import HeatmapTab from './components/HeatmapTab'
+import EarningsTab from './components/EarningsTab'
+import OptionsTab from './components/OptionsTab'
+import MacroTab from './components/MacroTab'
+import WatchlistTab from './components/WatchlistTab'
+import AIAnalystTab from './components/AIAnalystTab'
 import { Spinner } from './components/ui'
 
 const TABS = [
-  { id: 'stocks',    label: 'All Stocks' },
-  { id: 'portfolio', label: "Claude's Portfolio" },
+  { id: 'stocks',      label: 'All Stocks' },
+  { id: 'portfolio',   label: "Claude's Portfolio" },
+  { id: 'politicians', label: '🏛 Politicians' },
+  { id: 'ai-picks',    label: 'AI Picks' },
+  { id: 'news',        label: 'Market News' },
+  { id: 'my-portfolio',label: 'My Portfolio' },
+  { id: 'screener',    label: 'Screener' },
+  { id: 'heatmap',     label: 'Heatmap' },
+  { id: 'earnings',    label: 'Earnings' },
+  { id: 'options',     label: 'Options Flow' },
+  { id: 'macro',       label: 'Macro' },
+  { id: 'watchlist',   label: '⭐ Watchlist' },
+  { id: 'ai-analyst',  label: 'AI Analyst' },
 ]
 
 export default function App() {
@@ -69,8 +91,19 @@ export default function App() {
           </div>
         )}
 
-        {!loading && activeTab === 'stocks' && <StocksTab stocks={stocks} />}
-        {activeTab === 'portfolio' && <PortfolioTab stocks={stocks} />}
+        {!loading && activeTab === 'stocks'       && <StocksTab stocks={stocks} />}
+        {           activeTab === 'portfolio'     && <PortfolioTab stocks={stocks} />}
+        {           activeTab === 'politicians'   && <PoliticiansTab stocks={stocks} />}
+        {           activeTab === 'ai-picks'      && <AIPicksTab stocks={stocks} />}
+        {           activeTab === 'news'          && <NewsTab />}
+        {           activeTab === 'my-portfolio'  && <MyPortfolioTab stocks={stocks} />}
+        {           activeTab === 'screener'      && <ScreenerTab stocks={stocks} />}
+        {           activeTab === 'heatmap'       && <HeatmapTab stocks={stocks} />}
+        {           activeTab === 'earnings'      && <EarningsTab />}
+        {           activeTab === 'options'       && <OptionsTab />}
+        {           activeTab === 'macro'         && <MacroTab />}
+        {           activeTab === 'watchlist'     && <WatchlistTab stocks={stocks} />}
+        {           activeTab === 'ai-analyst'    && <AIAnalystTab stocks={stocks} />}
       </main>
     </div>
   )

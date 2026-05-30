@@ -45,8 +45,13 @@ async def lifespan(app: FastAPI):
     global http_client
     http_client = httpx.AsyncClient(timeout=10.0)
     log.info("HTTP client started")
-    # Fetch prices immediately on startup
     asyncio.create_task(refresh_all_prices())
+    asyncio.create_task(price_refresh_loop())
+    asyncio.create_task(refresh_crypto())
+    async def _marketstack_startup():
+        await asyncio.sleep(10)
+        await fetch_marketstack_batch()
+    asyncio.create_task(_marketstack_startup())
     yield
     await http_client.aclose()
     log.info("HTTP client closed")
@@ -309,16 +314,6 @@ async def get_status():
         "is_fetching": is_fetching,
     }
 
-
-@app.on_event("startup")
-async def start_background_tasks():
-    asyncio.create_task(price_refresh_loop())
-    asyncio.create_task(refresh_crypto())
-    # Marketstack: one-shot batch fill for any symbols missing after primary sources
-    async def _marketstack_startup():
-        await asyncio.sleep(10)  # wait for primary refresh to complete first
-        await fetch_marketstack_batch()
-    asyncio.create_task(_marketstack_startup())
 
 
 # ── Serve frontend ───────────────────────────────────────────────
