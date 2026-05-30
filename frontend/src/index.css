@@ -1,0 +1,55 @@
+:root {
+  --bg: #0a0b0d;
+  --surface: #111318;
+  --surface2: #181b22;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text: #f0f0ee;
+  --muted: #7a7f8e;
+  --accent: #c8f135;
+  --accent2: #4af0b0;
+  --accent3: #ff6b4a;
+  --accent4: #7c8cff;
+  --gold: #f0c040;
+  --red: #ff4e4e;
+  --green: #3ddc84;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Mono', monospace;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font-family: 'DM Mono', monospace; cursor: pointer; }
+input, select { font-family: 'DM Mono', monospace; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.7); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes scroll-ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.fade-in { animation: fadeIn 0.3s ease; }
+
+.up { color: var(--green); }
+.dn { color: var(--red); }
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
