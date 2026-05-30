@@ -30,9 +30,11 @@ FMP_KEY          = os.getenv("FMP_API_KEY", "demo")
 AV_KEY           = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 MARKETSTACK_KEY  = os.getenv("MARKETSTACK_API_KEY", "")
 
-# ── In-memory price cache ────────────────────────────────────────
-# { "NVDA": { "price": 135.2, "chg": 1.4, "high": 136.0, ... } }
+# ── In-memory caches ─────────────────────────────────────────────
+# price_cache: real-time data (Alpaca, refreshed every 60s)
+# fundamentals_cache: PE, market cap, 52W high/low (FMP, refreshed every 4h)
 price_cache: dict = {}
+fundamentals_cache: dict = {}   # { sym: { pe, market_cap, year_high, year_low } }
 crypto_cache: dict = {}
 last_updated: Optional[datetime] = None
 is_fetching: bool = False
@@ -49,6 +51,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(refresh_all_prices())
     asyncio.create_task(price_refresh_loop())
     asyncio.create_task(refresh_crypto())
+    asyncio.create_task(refresh_fundamentals())
+    asyncio.create_task(fundamentals_refresh_loop())
     async def _marketstack_startup():
         await asyncio.sleep(10)
         await fetch_marketstack_batch()
@@ -245,13 +249,49 @@ async def refresh_crypto():
         log.warning(f"Crypto fetch error: {e}")
 
 
-# ── Background refresh loop ──────────────────────────────────────
+# ── Fundamentals cache (PE, market cap, 52W) ────────────────────
+# FMP is rate-limited on the free tier, so we only fetch fundamentals
+# once at startup and then every 4 hours. Prices stay on Alpaca.
+
+async def refresh_fundamentals():
+    """Fetch PE, market cap, 52W high/low from FMP. Rate-limited: run infrequently."""
+    global fundamentals_cache
+    log.info("Refreshing fundamentals for %d symbols via FMP...", len(SYMBOLS))
+    batch_size = 15
+    filled = 0
+    for i in range(0, len(SYMBOLS), batch_size):
+        batch = SYMBOLS[i:i + batch_size]
+        results = await asyncio.gather(
+            *[fetch_fmp_quote(sym) for sym in batch],
+            return_exceptions=True,
+        )
+        for sym, result in zip(batch, results):
+            if isinstance(result, dict) and result:
+                fundamentals_cache[sym] = {
+                    "pe":         result.get("pe"),
+                    "market_cap": result.get("market_cap"),
+                    "year_high":  result.get("year_high"),
+                    "year_low":   result.get("year_low"),
+                }
+                filled += 1
+        if i + batch_size < len(SYMBOLS):
+            await asyncio.sleep(0.4)
+    log.info("Fundamentals refresh complete: %d/%d symbols", filled, len(SYMBOLS))
+
+
+# ── Background refresh loops ─────────────────────────────────────
 
 async def price_refresh_loop():
     while True:
         await asyncio.sleep(60)  # refresh every 60 seconds
         await refresh_all_prices()
         await refresh_crypto()
+
+
+async def fundamentals_refresh_loop():
+    while True:
+        await asyncio.sleep(4 * 3600)  # every 4 hours
+        await refresh_fundamentals()
 
 
 # ── API Routes ───────────────────────────────────────────────────
@@ -263,6 +303,7 @@ async def get_all_prices():
     for stock in STOCKS:
         sym = stock["sym"]
         quote = price_cache.get(sym, {})
+        fund = fundamentals_cache.get(sym, {})
         result.append({
             **stock,
             "price":      quote.get("price"),
@@ -272,12 +313,13 @@ async def get_all_prices():
             "low":        quote.get("low"),
             "open":       quote.get("open"),
             "prev_close": quote.get("prev_close"),
-            "pe":         quote.get("pe"),
-            "market_cap": quote.get("market_cap"),
             "volume":     quote.get("volume"),
-            "year_high":  quote.get("year_high"),
-            "year_low":   quote.get("year_low"),
             "source":     quote.get("source", "pending"),
+            # Fundamentals from dedicated FMP cache (survive Alpaca being primary)
+            "pe":         fund.get("pe")         or quote.get("pe"),
+            "market_cap": fund.get("market_cap") or quote.get("market_cap"),
+            "year_high":  fund.get("year_high")  or quote.get("year_high"),
+            "year_low":   fund.get("year_low")   or quote.get("year_low"),
         })
     return {
         "stocks": result,
@@ -295,6 +337,63 @@ async def get_price(sym: str):
     stock = STOCK_MAP[sym]
     quote = price_cache.get(sym, {})
     return {**stock, **quote}
+
+
+# ── News endpoint ────────────────────────────────────────────────
+
+_BULLISH = {"beats","beat","record","upgrade","growth","strong","surges","surge","rally",
+            "profit","exceeds","raises","bullish","breakout","acquisition","deal","boost",
+            "gains","rises","rises","higher","outperforms","tops","expands","wins","launches",
+            "milestone","partnership","approved","approval","positive","revenue","soars"}
+_BEARISH = {"misses","miss","warning","downgrade","loss","decline","falls","drops","lawsuit",
+            "recall","crash","cut","slump","disappoints","bearish","layoffs","bankruptcy",
+            "fraud","investigation","lower","weak","concern","risk","scrutiny","probe",
+            "charges","fine","penalty","deficit","shortfall","suspended","failed","failure"}
+
+def _headline_sentiment(text: str) -> str:
+    words = set(text.lower().split())
+    bull = len(words & _BULLISH)
+    bear = len(words & _BEARISH)
+    if bull > bear: return "bullish"
+    if bear > bull: return "bearish"
+    return "neutral"
+
+
+@app.get("/api/news")
+async def get_news(symbols: str = "", limit: int = 50):
+    """Fetch latest news from Alpaca with keyword-based sentiment scoring."""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return []
+    params: dict = {"limit": min(limit, 50), "sort": "desc", "include_content": "false"}
+    if symbols:
+        params["symbols"] = symbols
+    try:
+        r = await http_client.get(
+            "https://data.alpaca.markets/v1beta1/news",
+            headers=_alpaca_headers(),
+            params=params,
+        )
+        if r.status_code != 200:
+            log.warning("Alpaca news HTTP %s", r.status_code)
+            return []
+        articles = r.json().get("news", [])
+        return [
+            {
+                "id":          a.get("id"),
+                "headline":    a.get("headline", ""),
+                "summary":     a.get("summary", ""),
+                "author":      a.get("author", ""),
+                "source":      a.get("source", ""),
+                "url":         a.get("url", ""),
+                "publishedAt": a.get("created_at", ""),
+                "symbols":     a.get("symbols", []),
+                "sentiment":   _headline_sentiment(a.get("headline", "")),
+            }
+            for a in articles
+        ]
+    except Exception as e:
+        log.warning("News fetch error: %s", e)
+        return []
 
 
 @app.get("/api/crypto")

@@ -5,7 +5,13 @@ const STAR_LABELS = { 5: 'Strong Buy', 4: 'Buy', 3: 'Hold', 2: 'Reduce', 1: 'Avo
 const STAR_COLORS = { 5: 'var(--accent)', 4: 'var(--accent2)', 3: 'var(--gold)', 2: 'var(--accent3)', 1: 'var(--muted)' }
 const TOP_BORDER  = { 5: 'var(--accent)', 4: 'var(--accent2)', 3: 'var(--gold)', 2: 'var(--accent3)', 1: '#3a3d45' }
 
-function StockCard({ stock }) {
+const SENTIMENT_STYLE = {
+  bullish: { color: 'var(--green)',   bg: 'rgba(61,220,132,0.1)',  border: 'rgba(61,220,132,0.25)',  icon: '▲' },
+  bearish: { color: 'var(--red)',     bg: 'rgba(255,78,78,0.1)',   border: 'rgba(255,78,78,0.25)',   icon: '▼' },
+  neutral: { color: 'var(--muted)',   bg: 'var(--surface2)',       border: 'var(--border)',          icon: '◆' },
+}
+
+function StockCard({ stock, sentiment }) {
   const [hovered, setHovered] = useState(false)
   const up = (stock.chg || 0) >= 0
   const upside = stock.price && stock.target
@@ -47,7 +53,7 @@ function StockCard({ stock }) {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
         <div style={{
           fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 22,
-          color: stock._priceUp === true ? 'var(--green)' : stock._priceUp === false ? 'var(--red)' : 'var(--text)',
+          color: (stock.chg || 0) > 0 ? 'var(--green)' : (stock.chg || 0) < 0 ? 'var(--red)' : 'var(--text)',
           transition: 'color 0.8s',
         }}>
           {stock.price ? formatPrice(stock.price) : '—'}
@@ -80,6 +86,21 @@ function StockCard({ stock }) {
           </Badge>
         ))}
       </div>
+
+      {/* News sentiment badge */}
+      {sentiment && (() => {
+        const s = SENTIMENT_STYLE[sentiment]
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8 }}>
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 4, fontWeight: 600,
+              color: s.color, background: s.bg, border: `1px solid ${s.border}`,
+            }}>
+              {s.icon} NEWS {sentiment.toUpperCase()}
+            </span>
+          </div>
+        )
+      })()}
 
       {/* Fundamentals row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
@@ -124,7 +145,7 @@ function StockCard({ stock }) {
   )
 }
 
-export default function StocksTab({ stocks }) {
+export default function StocksTab({ stocks, newsSentiment = {} }) {
   const [filterStars, setFilterStars] = useState(0)
   const [filterSector, setFilterSector] = useState('')
   const [sort, setSort] = useState('stars-desc')
@@ -154,7 +175,7 @@ export default function StocksTab({ stocks }) {
             All Stocks — Live Prices
           </div>
           <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 4 }}>
-            {filtered.length} of {stocks.length} stocks · FMP · Alpha Vantage · Marketstack
+            {filtered.length} of {stocks.length} stocks · Alpaca · FMP
           </div>
         </div>
       </div>
@@ -211,7 +232,7 @@ export default function StocksTab({ stocks }) {
         gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))',
         gap: 14,
       }}>
-        {filtered.map(s => <StockCard key={s.sym} stock={s} />)}
+        {filtered.map(s => <StockCard key={s.sym} stock={s} sentiment={newsSentiment[s.sym] || null} />)}
       </div>
     </div>
   )
