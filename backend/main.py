@@ -49,10 +49,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(refresh_all_prices())
     asyncio.create_task(price_refresh_loop())
     asyncio.create_task(refresh_crypto())
-    # Try Robinhood login on startup if credentials are present
-    if ROBINHOOD_USER and ROBINHOOD_PASS:
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, _rh_login)
     async def _marketstack_startup():
         await asyncio.sleep(10)
         await fetch_marketstack_batch()
@@ -320,97 +316,77 @@ async def get_status():
     }
 
 
-# ── Robinhood integration ────────────────────────────────────────
-import threading
+# ── Alpaca integration ───────────────────────────────────────────
+# Stateless key/secret auth — no login step needed.
+# Paper trading is the default; set ALPACA_PAPER=false for live.
 
-ROBINHOOD_USER   = os.getenv("ROBINHOOD_USERNAME", "")
-ROBINHOOD_PASS   = os.getenv("ROBINHOOD_PASSWORD", "")
-ROBINHOOD_TOTP   = os.getenv("ROBINHOOD_TOTP_SECRET", "")   # TOTP secret from Robinhood 2FA setup
+ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
+ALPACA_PAPER  = os.getenv("ALPACA_PAPER", "true").lower() != "false"
 
-_rh_logged_in: bool = False
-_rh_portfolio_cache: dict = {}
-_rh_lock = threading.Lock()
+def _alpaca_base() -> str:
+    return "https://paper-api.alpaca.markets" if ALPACA_PAPER else "https://api.alpaca.markets"
 
-
-def _rh_login() -> bool:
-    """Attempt Robinhood login. Returns True on success."""
-    global _rh_logged_in
-    if not ROBINHOOD_USER or not ROBINHOOD_PASS:
-        return False
-    try:
-        import robin_stocks.robinhood as rh
-        import pyotp
-        kwargs = {}
-        if ROBINHOOD_TOTP:
-            kwargs["mfa_code"] = pyotp.TOTP(ROBINHOOD_TOTP).now()
-        rh.login(ROBINHOOD_USER, ROBINHOOD_PASS, **kwargs)
-        _rh_logged_in = True
-        log.info("Robinhood: logged in as %s", ROBINHOOD_USER)
-        return True
-    except Exception as e:
-        log.warning("Robinhood login failed: %s", e)
-        _rh_logged_in = False
-        return False
+def _alpaca_headers() -> dict:
+    return {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
 
-def _rh_fetch_portfolio() -> dict:
-    """Fetch and return portfolio data from Robinhood. Caches result."""
-    global _rh_portfolio_cache, _rh_logged_in
-    try:
-        import robin_stocks.robinhood as rh
-        if not _rh_logged_in:
-            if not _rh_login():
-                return {"connected": False, "error": "Not logged in — add ROBINHOOD_USERNAME / ROBINHOOD_PASSWORD to .env"}
-
-        profile   = rh.load_portfolio_profile() or {}
-        holdings  = rh.build_holdings() or {}
-        account   = rh.load_account_profile() or {}
-
-        positions = []
-        for sym, h in holdings.items():
-            positions.append({
-                "sym":        sym,
-                "name":       h.get("name", sym),
-                "shares":     float(h.get("quantity", 0)),
-                "avgCost":    float(h.get("average_buy_price", 0)),
-                "price":      float(h.get("price", 0)),
-                "equity":     float(h.get("equity", 0)),
-                "pnl":        float(h.get("equity_change", 0)),
-                "pnlPct":     float(h.get("percent_change", 0)),
-                "pe":         h.get("pe_ratio"),
-            })
-
-        result = {
-            "connected":        True,
-            "username":         ROBINHOOD_USER,
-            "equity":           float(profile.get("equity", 0)),
-            "cash":             float(account.get("cash", 0)),
-            "totalReturn":      float(profile.get("total_return", 0) or 0),
-            "dayReturn":        float(profile.get("equity_previous_close", 0) or 0),
-            "marketValue":      float(profile.get("market_value", 0) or 0),
-            "positions":        positions,
+@app.get("/api/alpaca")
+async def get_alpaca():
+    """Return live Alpaca portfolio. Requires ALPACA_API_KEY + ALPACA_SECRET_KEY in .env."""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return {
+            "connected": False,
+            "error": "Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env",
         }
-        _rh_portfolio_cache = result
-        return result
+
+    base    = _alpaca_base()
+    headers = _alpaca_headers()
+
+    try:
+        account_r, positions_r = await asyncio.gather(
+            http_client.get(f"{base}/v2/account",   headers=headers),
+            http_client.get(f"{base}/v2/positions", headers=headers),
+        )
     except Exception as e:
-        log.warning("Robinhood portfolio fetch failed: %s", e)
-        _rh_logged_in = False
-        if _rh_portfolio_cache:
-            return {**_rh_portfolio_cache, "stale": True}
+        log.warning("Alpaca HTTP error: %s", e)
         return {"connected": False, "error": str(e)}
 
+    if account_r.status_code in (401, 403):
+        return {"connected": False, "error": "Invalid API credentials — check ALPACA_API_KEY / ALPACA_SECRET_KEY"}
 
-@app.get("/api/robinhood")
-async def get_robinhood():
-    """Return live Robinhood portfolio. Requires credentials in .env."""
-    loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, _rh_fetch_portfolio)
-    return data
+    if account_r.status_code != 200:
+        return {"connected": False, "error": f"Alpaca returned HTTP {account_r.status_code}"}
 
+    account        = account_r.json()
+    positions_data = positions_r.json() if positions_r.status_code == 200 else []
 
-@app.get("/api/robinhood/status")
-async def get_robinhood_status():
-    return {"connected": _rh_logged_in, "username": ROBINHOOD_USER if _rh_logged_in else None}
+    positions = []
+    for p in (positions_data if isinstance(positions_data, list) else []):
+        sym  = p.get("symbol", "")
+        name = STOCK_MAP.get(sym, {}).get("name", sym)   # use known name or fall back to ticker
+        unrealized_plpc = float(p.get("unrealized_plpc", 0) or 0)
+        positions.append({
+            "sym":     sym,
+            "name":    name,
+            "shares":  float(p.get("qty", 0) or 0),
+            "avgCost": float(p.get("avg_entry_price", 0) or 0),
+            "price":   float(p.get("current_price", 0) or 0),
+            "equity":  float(p.get("market_value", 0) or 0),
+            "pnl":     float(p.get("unrealized_pl", 0) or 0),
+            "pnlPct":  round(unrealized_plpc * 100, 2),  # Alpaca gives decimal, convert to %
+        })
+
+    return {
+        "connected":     True,
+        "paper":         ALPACA_PAPER,
+        "accountNumber": account.get("account_number", ""),
+        "equity":        float(account.get("equity", 0) or 0),
+        "cash":          float(account.get("cash", 0) or 0),
+        "buyingPower":   float(account.get("buying_power", 0) or 0),
+        "dayPnl":        float(account.get("equity", 0) or 0) - float(account.get("last_equity", 0) or 0),
+        "positions":     positions,
+    }
 
 
 # ── Portfolio persistence ────────────────────────────────────────
