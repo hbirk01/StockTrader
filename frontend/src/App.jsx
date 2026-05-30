@@ -55,7 +55,7 @@ export default function App() {
         {loading && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: 'var(--muted)', fontSize: 12 }}>
             <Spinner size={16} />
-            Fetching live prices from Finnhub...
+            Fetching live prices...
           </div>
         )}
 
@@ -65,7 +65,7 @@ export default function App() {
             border: '1px solid rgba(255,107,74,0.3)', borderRadius: 8,
             color: 'var(--accent3)', fontSize: 12, marginBottom: 16,
           }}>
-            ⚠ API error: {error} — check your Finnhub key in .env
+            ⚠ API error: {error} — check your API keys in .env
           </div>
         )}
 

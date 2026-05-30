@@ -154,7 +154,7 @@ export default function StocksTab({ stocks }) {
             All Stocks — Live Prices
           </div>
           <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 4 }}>
-            {filtered.length} of {stocks.length} stocks · prices from Finnhub backend
+            {filtered.length} of {stocks.length} stocks · FMP · Alpha Vantage · Marketstack
           </div>
         </div>
       </div>

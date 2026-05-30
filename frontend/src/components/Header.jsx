@@ -106,7 +106,7 @@ export function Header({ status, lastUpdated, onRefresh }) {
             border: `1px solid ${isLive ? 'rgba(61,220,132,0.3)' : 'var(--border)'}`,
             borderRadius: 20,
           }}>
-            {status.prices_cached}/{status.total_symbols} prices · Finnhub
+            {status.prices_cached}/{status.total_symbols} prices · Live
           </div>
         )}
 
