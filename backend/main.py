@@ -145,32 +145,41 @@ async def fetch_quote(sym: str) -> Optional[dict]:
 
 
 async def refresh_all_prices():
-    """Fetch all stock prices concurrently in batches."""
+    """Fetch all stock prices — Alpaca first (one call, real-time), FMP/AV for gaps."""
     global price_cache, last_updated, is_fetching
     if is_fetching:
         return
     is_fetching = True
-    log.info(f"Refreshing prices for {len(SYMBOLS)} stocks...")
+    log.info("Refreshing prices for %d stocks...", len(SYMBOLS))
 
-    # Batch into groups of 15 with small delay to avoid rate limits
-    batch_size = 15
-    updated = 0
-    for i in range(0, len(SYMBOLS), batch_size):
-        batch = SYMBOLS[i:i + batch_size]
-        results = await asyncio.gather(
-            *[fetch_quote(sym) for sym in batch],
-            return_exceptions=True,
-        )
-        for sym, result in zip(batch, results):
-            if isinstance(result, dict) and result:
-                price_cache[sym] = result
-                updated += 1
-        if i + batch_size < len(SYMBOLS):
-            await asyncio.sleep(0.3)
+    # 1. Alpaca real-time snapshots (all symbols in a single request, no rate limit)
+    alpaca_prices = await fetch_alpaca_snapshots_batch()
+    for sym, quote in alpaca_prices.items():
+        price_cache[sym] = quote
+
+    # 2. FMP / Alpha Vantage fallback for any symbols Alpaca didn't return
+    missing = [s for s in SYMBOLS if s not in price_cache]
+    if missing:
+        log.info("FMP/AV fallback for %d missing symbols", len(missing))
+        batch_size = 15
+        updated = 0
+        for i in range(0, len(missing), batch_size):
+            batch = missing[i:i + batch_size]
+            results = await asyncio.gather(
+                *[fetch_quote(sym) for sym in batch],
+                return_exceptions=True,
+            )
+            for sym, result in zip(batch, results):
+                if isinstance(result, dict) and result:
+                    price_cache[sym] = result
+                    updated += 1
+            if i + batch_size < len(missing):
+                await asyncio.sleep(0.3)
+        log.info("FMP/AV filled %d/%d gaps", updated, len(missing))
 
     last_updated = datetime.utcnow()
     is_fetching = False
-    log.info(f"Price refresh complete: {updated}/{len(SYMBOLS)} updated")
+    log.info("Price refresh complete: %d/%d in cache", len(price_cache), len(SYMBOLS))
 
 
 async def fetch_marketstack_batch() -> None:
@@ -324,11 +333,55 @@ ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_PAPER  = os.getenv("ALPACA_PAPER", "true").lower() != "false"
 
+ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
+
 def _alpaca_base() -> str:
     return "https://paper-api.alpaca.markets" if ALPACA_PAPER else "https://api.alpaca.markets"
 
 def _alpaca_headers() -> dict:
     return {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+
+async def fetch_alpaca_snapshots_batch() -> dict:
+    """Fetch all stock snapshots from Alpaca in one API call. Returns {sym: quote}."""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return {}
+    try:
+        r = await http_client.get(
+            f"{ALPACA_DATA_BASE}/stocks/snapshots",
+            headers=_alpaca_headers(),
+            params={"symbols": ",".join(SYMBOLS), "feed": "iex"},
+        )
+        if r.status_code != 200:
+            log.warning("Alpaca snapshots HTTP %s", r.status_code)
+            return {}
+        result = {}
+        for sym, snap in r.json().items():
+            trade    = snap.get("latestTrade", {})
+            daily    = snap.get("dailyBar", {})
+            prev     = snap.get("prevDailyBar", {})
+            price    = float(trade.get("p") or daily.get("c") or 0)
+            prev_c   = float(prev.get("c") or 0)
+            if not price:
+                continue
+            change   = price - prev_c
+            chg_pct  = round((change / prev_c * 100) if prev_c else 0, 2)
+            result[sym] = {
+                "price":      round(price, 2),
+                "chg":        chg_pct,
+                "change":     round(change, 2),
+                "high":       daily.get("h"),
+                "low":        daily.get("l"),
+                "open":       daily.get("o"),
+                "prev_close": round(prev_c, 2) if prev_c else None,
+                "volume":     daily.get("v"),
+                "source":     "alpaca",
+            }
+        log.info("Alpaca snapshots: %d/%d prices fetched", len(result), len(SYMBOLS))
+        return result
+    except Exception as e:
+        log.warning("Alpaca snapshots error: %s", e)
+        return {}
 
 
 @app.get("/api/alpaca")
@@ -387,6 +440,137 @@ async def get_alpaca():
         "dayPnl":        float(account.get("equity", 0) or 0) - float(account.get("last_equity", 0) or 0),
         "positions":     positions,
     }
+
+
+# ── Alpaca: portfolio history ────────────────────────────────────
+
+@app.get("/api/alpaca/history")
+async def get_alpaca_history(period: str = "1M"):
+    """Return portfolio equity history. period: 1W | 1M | 3M | 1Y"""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return {"error": "No credentials"}
+    # Alpaca uses "1A" for 1 year; timeframe 1H for short periods, 1D for longer
+    period_map  = {"1W": ("1W", "1H"), "1M": ("1M", "1D"), "3M": ("3M", "1D"), "1Y": ("1A", "1D")}
+    alp_period, timeframe = period_map.get(period, ("1M", "1D"))
+    base    = _alpaca_base()
+    headers = _alpaca_headers()
+    try:
+        r = await http_client.get(
+            f"{base}/v2/portfolio/history",
+            headers=headers,
+            params={"period": alp_period, "timeframe": timeframe, "intraday_reporting": "market_hours"},
+        )
+        if r.status_code != 200:
+            return {"error": f"Alpaca HTTP {r.status_code}"}
+        raw        = r.json()
+        timestamps = raw.get("timestamp", [])
+        equity_arr = raw.get("equity", [])
+        pl_arr     = raw.get("profit_loss", [])
+        points = []
+        for i, ts in enumerate(timestamps):
+            eq  = equity_arr[i]  if i < len(equity_arr)  else None
+            pl  = pl_arr[i]      if i < len(pl_arr)       else None
+            if eq is None:
+                continue
+            from datetime import timezone
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            label = dt.strftime("%b %d") if timeframe == "1D" else dt.strftime("%b %d %H:%M")
+            points.append({"date": label, "equity": round(float(eq), 2), "pnl": round(float(pl or 0), 2)})
+        return {"points": points, "period": period}
+    except Exception as e:
+        log.warning("Alpaca history error: %s", e)
+        return {"error": str(e)}
+
+
+# ── Alpaca: order history ────────────────────────────────────────
+
+@app.get("/api/alpaca/orders")
+async def get_alpaca_orders():
+    """Return the 50 most recent orders (all statuses)."""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        return []
+    base    = _alpaca_base()
+    headers = _alpaca_headers()
+    try:
+        r = await http_client.get(
+            f"{base}/v2/orders",
+            headers=headers,
+            params={"status": "all", "limit": 50, "direction": "desc"},
+        )
+        if r.status_code != 200:
+            return []
+        orders = r.json()
+        if not isinstance(orders, list):
+            return []
+        result = []
+        for o in orders:
+            result.append({
+                "id":          o.get("id"),
+                "sym":         o.get("symbol"),
+                "side":        o.get("side"),
+                "qty":         float(o.get("qty", 0) or 0),
+                "filledQty":   float(o.get("filled_qty", 0) or 0),
+                "filledPrice": float(o.get("filled_avg_price", 0) or 0),
+                "type":        o.get("type"),
+                "status":      o.get("status"),
+                "createdAt":   o.get("created_at"),
+            })
+        return result
+    except Exception as e:
+        log.warning("Alpaca orders error: %s", e)
+        return []
+
+
+# ── Alpaca: place order ──────────────────────────────────────────
+
+@app.post("/api/alpaca/order")
+async def place_alpaca_order(request: Request):
+    """Place a market or limit order via Alpaca."""
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        raise HTTPException(400, "Alpaca credentials not configured")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    symbol      = (body.get("symbol") or "").upper().strip()
+    qty         = body.get("qty")
+    side        = body.get("side", "").lower()
+    order_type  = body.get("type", "market").lower()
+    limit_price = body.get("limitPrice")
+
+    if not symbol or not qty or side not in ("buy", "sell"):
+        raise HTTPException(400, "symbol, qty, and side (buy|sell) are required")
+
+    order_body: dict = {
+        "symbol":        symbol,
+        "qty":           str(qty),
+        "side":          side,
+        "type":          order_type,
+        "time_in_force": "day",
+    }
+    if order_type == "limit" and limit_price:
+        order_body["limit_price"] = str(limit_price)
+
+    base    = _alpaca_base()
+    headers = {**_alpaca_headers(), "Content-Type": "application/json"}
+    try:
+        r = await http_client.post(f"{base}/v2/orders", headers=headers, json=order_body)
+        data = r.json()
+        if r.status_code not in (200, 201):
+            return {"ok": False, "error": data.get("message", f"HTTP {r.status_code}")}
+        return {
+            "ok":      True,
+            "orderId": data.get("id"),
+            "status":  data.get("status"),
+            "symbol":  data.get("symbol"),
+            "qty":     data.get("qty"),
+            "side":    data.get("side"),
+            "type":    data.get("type"),
+        }
+    except Exception as e:
+        log.warning("Alpaca order error: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 # ── Portfolio persistence ────────────────────────────────────────
