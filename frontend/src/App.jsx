@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useStocks, useCrypto } from './hooks/useStocks'
 import { TickerTape, Header } from './components/Header'
 import StocksTab from './components/StocksTab'
@@ -36,6 +36,34 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('stocks')
   const { stocks, lastUpdated, loading, error, status, triggerRefresh } = useStocks(60000)
   const crypto = useCrypto()
+
+  // News sentiment map: { SYM: 'bullish' | 'bearish' | 'neutral' }
+  const [newsSentiment, setNewsSentiment] = useState({})
+  const [newsArticles,  setNewsArticles]  = useState([])
+  useEffect(() => {
+    if (!stocks.length) return
+    const syms = stocks.map(s => s.sym).join(',')
+    fetch(`/api/news?symbols=${syms}&limit=50`)
+      .then(r => r.json())
+      .then(articles => {
+        if (!Array.isArray(articles)) return
+        setNewsArticles(articles)
+        // Aggregate per-stock sentiment
+        const counts = {}
+        articles.forEach(a => {
+          (a.symbols || []).forEach(sym => {
+            if (!counts[sym]) counts[sym] = { bullish: 0, bearish: 0, neutral: 0 }
+            counts[sym][a.sentiment] = (counts[sym][a.sentiment] || 0) + 1
+          })
+        })
+        const map = {}
+        Object.entries(counts).forEach(([sym, c]) => {
+          map[sym] = c.bullish > c.bearish ? 'bullish' : c.bearish > c.bullish ? 'bearish' : 'neutral'
+        })
+        setNewsSentiment(map)
+      })
+      .catch(() => {})
+  }, [stocks.length])
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
@@ -91,11 +119,11 @@ export default function App() {
           </div>
         )}
 
-        {!loading && activeTab === 'stocks'       && <StocksTab stocks={stocks} />}
+        {!loading && activeTab === 'stocks'       && <StocksTab stocks={stocks} newsSentiment={newsSentiment} />}
         {           activeTab === 'portfolio'     && <PortfolioTab stocks={stocks} />}
         {           activeTab === 'politicians'   && <PoliticiansTab stocks={stocks} />}
         {           activeTab === 'ai-picks'      && <AIPicksTab stocks={stocks} />}
-        {           activeTab === 'news'          && <NewsTab />}
+        {           activeTab === 'news'          && <NewsTab articles={newsArticles} />}
         {           activeTab === 'my-portfolio'  && <MyPortfolioTab stocks={stocks} />}
         {           activeTab === 'screener'      && <ScreenerTab stocks={stocks} />}
         {           activeTab === 'heatmap'       && <HeatmapTab stocks={stocks} />}

@@ -37,9 +37,10 @@ function NewsCard({ n }) {
   const sentColor = n.sentiment === 'BULLISH' ? 'var(--green)' : n.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--muted)'
   return (
     <div
-      style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, padding:'18px 20px', marginBottom:12, display:'flex', gap:16, alignItems:'flex-start', transition:'all 0.2s', cursor:'pointer' }}
+      style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, padding:'18px 20px', marginBottom:12, display:'flex', gap:16, alignItems:'flex-start', transition:'all 0.2s', cursor: n.url ? 'pointer' : 'default' }}
       onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border2)'; e.currentTarget.style.background = 'var(--surface2)' }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--surface)' }}
+      onClick={() => n.url && window.open(n.url, '_blank', 'noopener')}
     >
       <div style={{ width:38, height:38, borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0, background:impactBg, color:impactColor }}>{n.icon}</div>
       <div style={{ flex:1 }}>
@@ -59,13 +60,47 @@ function NewsCard({ n }) {
   )
 }
 
-export default function NewsTab() {
+function relativeTime(iso) {
+  if (!iso) return ''
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000
+  if (diff < 60)        return 'just now'
+  if (diff < 3600)      return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400)     return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+function normaliseAlpaca(a) {
+  const s = a.sentiment  // 'bullish' | 'bearish' | 'neutral'
+  return {
+    impact:    s === 'bullish' ? 'bull' : s === 'bearish' ? 'bear' : 'neut',
+    icon:      s === 'bullish' ? '↑'    : s === 'bearish' ? '↓'    : '→',
+    source:    (a.source || '').toUpperCase(),
+    headline:  a.headline,
+    desc:      a.summary || '',
+    time:      relativeTime(a.publishedAt),
+    tickers:   a.symbols || [],
+    sentiment: s.toUpperCase(),
+    category:  'live',
+    url:       a.url,
+  }
+}
+
+export default function NewsTab({ articles = [] }) {
   const [filter, setFilter] = useState('all')
 
+  // Use live articles when available, otherwise fall back to static
+  const allNews = useMemo(() => {
+    if (articles.length) return articles.map(normaliseAlpaca)
+    return NEWS
+  }, [articles])
+
   const filtered = useMemo(() => {
-    if (filter === 'all') return NEWS
-    return NEWS.filter(n => n.category === filter)
-  }, [filter])
+    if (filter === 'all') return allNews
+    if (filter === 'live') return allNews
+    return allNews.filter(n => n.category === filter)
+  }, [allNews, filter])
+
+  const isLive = articles.length > 0
 
   const filters = [
     { id: 'all', label: 'All' },
@@ -80,8 +115,9 @@ export default function NewsTab() {
       <div style={{ fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:22, letterSpacing:'-0.02em', marginBottom:4 }}>
         Market News & Events
       </div>
-      <div style={{ fontSize:12, color:'var(--muted)', marginBottom:20 }}>
+      <div style={{ fontSize:12, color:'var(--muted)', marginBottom:20, display:'flex', alignItems:'center', gap:10 }}>
         Real-world events ranked by market impact. AI sentiment analysis applied to each story.
+        {isLive && <span style={{ fontSize:10, padding:'2px 8px', borderRadius:4, background:'rgba(61,220,132,0.1)', border:'1px solid rgba(61,220,132,0.25)', color:'var(--green)' }}>● LIVE via Alpaca</span>}
       </div>
 
       <div style={{ display:'flex', gap:16 }}>

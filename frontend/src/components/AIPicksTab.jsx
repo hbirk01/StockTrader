@@ -1,12 +1,13 @@
 import React, { useState, useMemo } from 'react'
 import { Stars, Sparkline } from './ui'
+import TradeModal from './TradeModal'
 
 const STAR_COLORS = { 5:'var(--accent)', 4:'var(--accent2)', 3:'var(--gold)', 2:'var(--accent3)', 1:'var(--muted)' }
 const STAR_BG = { 5:'var(--accent)', 4:'var(--accent2)', 3:'var(--gold)', 2:'var(--accent3)', 1:'#3a3d45' }
 const BUY_CLASS = { 5:'buy5', 4:'buy4', 3:'buy3', 2:'buy2', 1:'buy1' }
 const STAR_LABELS = { 5:'Strong Buy', 4:'Buy', 3:'Hold', 2:'Reduce', 1:'Avoid' }
 
-function RecCard({ stock }) {
+function RecCard({ stock, onBuy }) {
   const [hovered, setHovered] = useState(false)
   const up = (stock.chg || 0) >= 0
   const upside = stock.price && stock.target
@@ -76,7 +77,7 @@ function RecCard({ stock }) {
       </div>
 
       {/* Footer */}
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: stock.stars >= 4 ? 12 : 0 }}>
         <div>
           <div style={{ fontSize:10, color:'var(--muted)', letterSpacing:'0.06em' }}>PRICE TARGET</div>
           <div style={{ fontFamily:"'Syne',sans-serif", fontWeight:600, fontSize:16 }}>${stock.target}</div>
@@ -95,12 +96,26 @@ function RecCard({ stock }) {
           {'★'.repeat(stock.stars)} {STAR_LABELS[stock.stars]}
         </div>
       </div>
+
+      {/* Buy button — shown for 4★ and 5★ picks */}
+      {stock.stars >= 4 && (
+        <button
+          onClick={() => onBuy(stock.sym)}
+          style={{
+            width:'100%', padding:'9px', borderRadius:8, cursor:'pointer',
+            fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:12, letterSpacing:'0.04em',
+            background:'rgba(61,220,132,0.12)', border:'1px solid rgba(61,220,132,0.3)',
+            color:'var(--green)', transition:'all 0.15s',
+          }}
+        >↑ Buy {stock.sym}</button>
+      )}
     </div>
   )
 }
 
 export default function AIPicksTab({ stocks }) {
   const [filterStars, setFilterStars] = useState(0)
+  const [tradeModal,  setTradeModal]  = useState(null)
 
   const filtered = useMemo(() => {
     let data = [...stocks]
@@ -145,8 +160,17 @@ export default function AIPicksTab({ stocks }) {
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(300px, 1fr))', gap:16 }}>
-        {filtered.map(s => <RecCard key={s.sym} stock={s} />)}
+        {filtered.map(s => <RecCard key={s.sym} stock={s} onBuy={sym => setTradeModal({ symbol: sym, side: 'buy' })} />)}
       </div>
+
+      {tradeModal && (
+        <TradeModal
+          initialSymbol={tradeModal.symbol}
+          initialSide={tradeModal.side}
+          onClose={() => setTradeModal(null)}
+          onFilled={() => setTradeModal(null)}
+        />
+      )}
     </div>
   )
 }
