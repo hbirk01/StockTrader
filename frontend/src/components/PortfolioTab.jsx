@@ -3,18 +3,51 @@ import { Stars, StatCard, Card, formatPrice, formatMktCap } from './ui'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 const STORAGE_KEY = 'claude-portfolio-v4'
+const API_URL = '/api/portfolio'
 
-function loadPortfolio() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {}
+function freshPortfolio() {
   const today = new Date().toISOString().slice(0, 10)
   return { startDate: today, cash: 10000, holdings: {}, trades: [], history: [{ date: today, value: 10000 }], lastRebalance: null }
 }
 
-function savePortfolio(p) {
+function loadFromLocal() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return null
+}
+
+function saveToLocal(p) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)) } catch {}
+}
+
+async function loadFromServer() {
+  try {
+    const res = await fetch(API_URL)
+    if (!res.ok) return null
+    const data = await res.json()
+    // Server returns {} when nothing saved yet
+    if (!data || !data.startDate) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+async function saveToServer(p) {
+  try {
+    await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+  } catch {}
+}
+
+function savePortfolio(p) {
+  saveToLocal(p)
+  saveToServer(p) // fire-and-forget
 }
 
 function calcValue(p, stocks) {
@@ -113,17 +146,31 @@ function runRebalance(p, stocks) {
 const TRADE_COLORS = { BUY: 'var(--green)', SELL: 'var(--red)', HOLD: 'var(--gold)' }
 
 export default function PortfolioTab({ stocks }) {
-  const [portfolio, setPortfolio] = useState(loadPortfolio)
+  // Start with local cache immediately (no flicker), then hydrate from server
+  const [portfolio, setPortfolio] = useState(() => loadFromLocal() || freshPortfolio())
+  const [serverLoaded, setServerLoaded] = useState(false)
 
-  // Auto-rebalance when stocks load and have prices
+  // Hydrate from server on mount — server is the source of truth
   useEffect(() => {
+    loadFromServer().then(serverData => {
+      if (serverData) {
+        saveToLocal(serverData)   // keep local in sync
+        setPortfolio(serverData)
+      }
+      setServerLoaded(true)
+    })
+  }, [])
+
+  // Auto-rebalance when stocks load and have prices (wait for server data first)
+  useEffect(() => {
+    if (!serverLoaded) return
     if (!stocks.length || !stocks.some(s => s.price)) return
     const updated = runRebalance({ ...portfolio }, stocks)
     if (updated.lastRebalance !== portfolio.lastRebalance || updated.trades.length !== portfolio.trades.length) {
       savePortfolio(updated)
       setPortfolio(updated)
     }
-  }, [stocks])
+  }, [stocks, serverLoaded])
 
   const totalVal = calcValue(portfolio, stocks)
   const gain = totalVal - 10000

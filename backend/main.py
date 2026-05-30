@@ -5,6 +5,7 @@ caches them, and exposes a clean REST API to the frontend.
 """
 
 import os
+import json
 import asyncio
 import logging
 from datetime import datetime
@@ -12,7 +13,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(refresh_all_prices())
     asyncio.create_task(price_refresh_loop())
     asyncio.create_task(refresh_crypto())
+    # Try Robinhood login on startup if credentials are present
+    if ROBINHOOD_USER and ROBINHOOD_PASS:
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _rh_login)
     async def _marketstack_startup():
         await asyncio.sleep(10)
         await fetch_marketstack_batch()
@@ -314,6 +319,137 @@ async def get_status():
         "is_fetching": is_fetching,
     }
 
+
+# ── Robinhood integration ────────────────────────────────────────
+import threading
+
+ROBINHOOD_USER   = os.getenv("ROBINHOOD_USERNAME", "")
+ROBINHOOD_PASS   = os.getenv("ROBINHOOD_PASSWORD", "")
+ROBINHOOD_TOTP   = os.getenv("ROBINHOOD_TOTP_SECRET", "")   # TOTP secret from Robinhood 2FA setup
+
+_rh_logged_in: bool = False
+_rh_portfolio_cache: dict = {}
+_rh_lock = threading.Lock()
+
+
+def _rh_login() -> bool:
+    """Attempt Robinhood login. Returns True on success."""
+    global _rh_logged_in
+    if not ROBINHOOD_USER or not ROBINHOOD_PASS:
+        return False
+    try:
+        import robin_stocks.robinhood as rh
+        import pyotp
+        kwargs = {}
+        if ROBINHOOD_TOTP:
+            kwargs["mfa_code"] = pyotp.TOTP(ROBINHOOD_TOTP).now()
+        rh.login(ROBINHOOD_USER, ROBINHOOD_PASS, **kwargs)
+        _rh_logged_in = True
+        log.info("Robinhood: logged in as %s", ROBINHOOD_USER)
+        return True
+    except Exception as e:
+        log.warning("Robinhood login failed: %s", e)
+        _rh_logged_in = False
+        return False
+
+
+def _rh_fetch_portfolio() -> dict:
+    """Fetch and return portfolio data from Robinhood. Caches result."""
+    global _rh_portfolio_cache, _rh_logged_in
+    try:
+        import robin_stocks.robinhood as rh
+        if not _rh_logged_in:
+            if not _rh_login():
+                return {"connected": False, "error": "Not logged in — add ROBINHOOD_USERNAME / ROBINHOOD_PASSWORD to .env"}
+
+        profile   = rh.load_portfolio_profile() or {}
+        holdings  = rh.build_holdings() or {}
+        account   = rh.load_account_profile() or {}
+
+        positions = []
+        for sym, h in holdings.items():
+            positions.append({
+                "sym":        sym,
+                "name":       h.get("name", sym),
+                "shares":     float(h.get("quantity", 0)),
+                "avgCost":    float(h.get("average_buy_price", 0)),
+                "price":      float(h.get("price", 0)),
+                "equity":     float(h.get("equity", 0)),
+                "pnl":        float(h.get("equity_change", 0)),
+                "pnlPct":     float(h.get("percent_change", 0)),
+                "pe":         h.get("pe_ratio"),
+            })
+
+        result = {
+            "connected":        True,
+            "username":         ROBINHOOD_USER,
+            "equity":           float(profile.get("equity", 0)),
+            "cash":             float(account.get("cash", 0)),
+            "totalReturn":      float(profile.get("total_return", 0) or 0),
+            "dayReturn":        float(profile.get("equity_previous_close", 0) or 0),
+            "marketValue":      float(profile.get("market_value", 0) or 0),
+            "positions":        positions,
+        }
+        _rh_portfolio_cache = result
+        return result
+    except Exception as e:
+        log.warning("Robinhood portfolio fetch failed: %s", e)
+        _rh_logged_in = False
+        if _rh_portfolio_cache:
+            return {**_rh_portfolio_cache, "stale": True}
+        return {"connected": False, "error": str(e)}
+
+
+@app.get("/api/robinhood")
+async def get_robinhood():
+    """Return live Robinhood portfolio. Requires credentials in .env."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _rh_fetch_portfolio)
+    return data
+
+
+@app.get("/api/robinhood/status")
+async def get_robinhood_status():
+    return {"connected": _rh_logged_in, "username": ROBINHOOD_USER if _rh_logged_in else None}
+
+
+# ── Portfolio persistence ────────────────────────────────────────
+# Stored in portfolio_data.json next to this file — gitignored so
+# git pushes never erase it.
+
+import pathlib
+_PORTFOLIO_FILE = pathlib.Path(__file__).parent / "portfolio_data.json"
+
+def _read_portfolio() -> dict:
+    try:
+        if _PORTFOLIO_FILE.exists():
+            return json.loads(_PORTFOLIO_FILE.read_text())
+    except Exception as e:
+        log.warning("portfolio read error: %s", e)
+    return {}
+
+def _write_portfolio(data: dict) -> None:
+    try:
+        _PORTFOLIO_FILE.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        log.warning("portfolio write error: %s", e)
+
+
+@app.get("/api/portfolio")
+async def get_portfolio():
+    """Return the persisted Claude portfolio state."""
+    return _read_portfolio()
+
+
+@app.post("/api/portfolio")
+async def save_portfolio(request: Request):
+    """Persist the Claude portfolio state sent from the frontend."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    _write_portfolio(body)
+    return {"ok": True}
 
 
 # ── Serve frontend ───────────────────────────────────────────────
