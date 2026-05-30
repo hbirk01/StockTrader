@@ -25,8 +25,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("pulsestockj")
 
-FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
-FMP_KEY     = os.getenv("FMP_API_KEY", "demo")
+FMP_KEY          = os.getenv("FMP_API_KEY", "demo")
+AV_KEY           = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+MARKETSTACK_KEY  = os.getenv("MARKETSTACK_API_KEY", "")
 
 # ── In-memory price cache ────────────────────────────────────────
 # { "NVDA": { "price": 135.2, "chg": 1.4, "high": 136.0, ... } }
@@ -63,34 +64,6 @@ app.add_middleware(
 
 # ── Price fetching ───────────────────────────────────────────────
 
-async def fetch_finnhub_quote(sym: str) -> Optional[dict]:
-    """Fetch a single quote from Finnhub."""
-    if not FINNHUB_KEY:
-        return None
-    # Finnhub uses BRK.B not BRK-B
-    api_sym = sym.replace("-", ".")
-    try:
-        r = await http_client.get(
-            f"https://finnhub.io/api/v1/quote",
-            params={"symbol": api_sym, "token": FINNHUB_KEY},
-        )
-        data = r.json()
-        if not data.get("c") or data["c"] == 0:
-            return None
-        return {
-            "price":      round(data["c"], 2),
-            "chg":        round(data.get("dp", 0), 2),
-            "change":     round(data.get("d", 0), 2),
-            "high":       data.get("h"),
-            "low":        data.get("l"),
-            "open":       data.get("o"),
-            "prev_close": data.get("pc"),
-            "source":     "finnhub",
-        }
-    except Exception as e:
-        log.warning(f"Finnhub error for {sym}: {e}")
-        return None
-
 
 async def fetch_fmp_quote(sym: str) -> Optional[dict]:
     """Fallback: FMP quote endpoint."""
@@ -125,13 +98,44 @@ async def fetch_fmp_quote(sym: str) -> Optional[dict]:
         return None
 
 
+async def fetch_alpha_vantage_quote(sym: str) -> Optional[dict]:
+    """Fallback: Alpha Vantage GLOBAL_QUOTE endpoint (25 req/day free tier)."""
+    if not AV_KEY:
+        return None
+    try:
+        r = await http_client.get(
+            "https://www.alphavantage.co/query",
+            params={"function": "GLOBAL_QUOTE", "symbol": sym, "apikey": AV_KEY},
+        )
+        data = r.json().get("Global Quote", {})
+        price = float(data.get("05. price", 0) or 0)
+        if not price:
+            return None
+        prev = float(data.get("08. previous close", 0) or 0)
+        change = float(data.get("09. change", 0) or 0)
+        chg_pct = round((change / prev * 100) if prev else 0, 2)
+        return {
+            "price":      round(price, 2),
+            "chg":        chg_pct,
+            "change":     round(change, 2),
+            "high":       float(data.get("03. high", 0) or 0) or None,
+            "low":        float(data.get("04. low", 0) or 0) or None,
+            "open":       float(data.get("02. open", 0) or 0) or None,
+            "prev_close": round(prev, 2) if prev else None,
+            "volume":     int(data.get("06. volume", 0) or 0) or None,
+            "source":     "alphavantage",
+        }
+    except Exception as e:
+        log.warning(f"Alpha Vantage error for {sym}: {e}")
+        return None
+
+
 async def fetch_quote(sym: str) -> Optional[dict]:
-    """Fetch quote — Finnhub primary, FMP fallback."""
-    quote = await fetch_finnhub_quote(sym)
+    """Fetch quote — FMP primary, Alpha Vantage fallback."""
+    quote = await fetch_fmp_quote(sym)
     if quote:
-        # Also grab fundamentals from FMP async (non-blocking enrichment)
         return quote
-    return await fetch_fmp_quote(sym)
+    return await fetch_alpha_vantage_quote(sym)
 
 
 async def refresh_all_prices():
@@ -161,6 +165,47 @@ async def refresh_all_prices():
     last_updated = datetime.utcnow()
     is_fetching = False
     log.info(f"Price refresh complete: {updated}/{len(SYMBOLS)} updated")
+
+
+async def fetch_marketstack_batch() -> None:
+    """Batch-fetch EOD prices for all symbols in 1-2 API calls.
+    Marketstack free = 100 req/month — only called once at startup to fill gaps.
+    """
+    if not MARKETSTACK_KEY:
+        return
+    batch_size = 50  # Marketstack allows up to 50 symbols per request
+    syms_needing_price = [s for s in SYMBOLS if s not in price_cache]
+    if not syms_needing_price:
+        return
+    log.info(f"Marketstack: filling {len(syms_needing_price)} missing prices...")
+    for i in range(0, len(syms_needing_price), batch_size):
+        batch = syms_needing_price[i:i + batch_size]
+        try:
+            r = await http_client.get(
+                "http://api.marketstack.com/v1/eod/latest",
+                params={"access_key": MARKETSTACK_KEY, "symbols": ",".join(batch), "limit": batch_size},
+            )
+            items = r.json().get("data", [])
+            for item in items:
+                sym = item.get("symbol", "").replace(".XNYS", "").replace(".XNAS", "")
+                price = item.get("close") or item.get("adj_close")
+                if sym and price:
+                    prev = item.get("open") or price
+                    change = round(price - prev, 2)
+                    price_cache[sym] = {
+                        "price":      round(float(price), 2),
+                        "chg":        round((change / prev * 100) if prev else 0, 2),
+                        "change":     change,
+                        "high":       item.get("high"),
+                        "low":        item.get("low"),
+                        "open":       item.get("open"),
+                        "prev_close": item.get("open"),
+                        "volume":     item.get("volume"),
+                        "source":     "marketstack",
+                    }
+            log.info(f"Marketstack: filled {len(items)} prices from batch {i // batch_size + 1}")
+        except Exception as e:
+            log.warning(f"Marketstack batch error: {e}")
 
 
 async def refresh_crypto():
@@ -261,7 +306,6 @@ async def get_status():
         "prices_cached": cached,
         "total_symbols": len(SYMBOLS),
         "last_updated": last_updated.isoformat() if last_updated else None,
-        "finnhub_configured": bool(FINNHUB_KEY),
         "is_fetching": is_fetching,
     }
 
@@ -270,6 +314,11 @@ async def get_status():
 async def start_background_tasks():
     asyncio.create_task(price_refresh_loop())
     asyncio.create_task(refresh_crypto())
+    # Marketstack: one-shot batch fill for any symbols missing after primary sources
+    async def _marketstack_startup():
+        await asyncio.sleep(10)  # wait for primary refresh to complete first
+        await fetch_marketstack_batch()
+    asyncio.create_task(_marketstack_startup())
 
 
 # ── Serve frontend ───────────────────────────────────────────────
