@@ -250,32 +250,39 @@ async def refresh_crypto():
 
 
 # ── Fundamentals cache (PE, market cap, 52W) ────────────────────
-# FMP is rate-limited on the free tier, so we only fetch fundamentals
-# once at startup and then every 4 hours. Prices stay on Alpaca.
+# Uses yfinance (Yahoo Finance) — free, no API key, covers all symbols.
+# Runs once at startup and every 4 hours. Prices stay on Alpaca.
+
+def _yf_fetch_one(sym: str) -> tuple:
+    """Synchronous — called from a ThreadPoolExecutor."""
+    try:
+        import yfinance as yf
+        info = yf.Ticker(sym).info
+        return sym, {
+            "pe":         info.get("trailingPE") or info.get("forwardPE"),
+            "market_cap": info.get("marketCap"),
+            "year_high":  info.get("fiftyTwoWeekHigh"),
+            "year_low":   info.get("fiftyTwoWeekLow"),
+        }
+    except Exception as e:
+        log.warning("yfinance error for %s: %s", sym, e)
+        return sym, {}
+
 
 async def refresh_fundamentals():
-    """Fetch PE, market cap, 52W high/low from FMP. Rate-limited: run infrequently."""
+    """Fetch PE, market cap, 52W high/low via yfinance (free, no key needed)."""
     global fundamentals_cache
-    log.info("Refreshing fundamentals for %d symbols via FMP...", len(SYMBOLS))
-    batch_size = 15
+    from concurrent.futures import ThreadPoolExecutor
+    log.info("Refreshing fundamentals for %d symbols via yfinance...", len(SYMBOLS))
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        tasks = [loop.run_in_executor(pool, _yf_fetch_one, sym) for sym in SYMBOLS]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
     filled = 0
-    for i in range(0, len(SYMBOLS), batch_size):
-        batch = SYMBOLS[i:i + batch_size]
-        results = await asyncio.gather(
-            *[fetch_fmp_quote(sym) for sym in batch],
-            return_exceptions=True,
-        )
-        for sym, result in zip(batch, results):
-            if isinstance(result, dict) and result:
-                fundamentals_cache[sym] = {
-                    "pe":         result.get("pe"),
-                    "market_cap": result.get("market_cap"),
-                    "year_high":  result.get("year_high"),
-                    "year_low":   result.get("year_low"),
-                }
-                filled += 1
-        if i + batch_size < len(SYMBOLS):
-            await asyncio.sleep(0.4)
+    for r in results:
+        if isinstance(r, tuple) and r[1]:
+            fundamentals_cache[r[0]] = r[1]
+            filled += 1
     log.info("Fundamentals refresh complete: %d/%d symbols", filled, len(SYMBOLS))
 
 
