@@ -452,11 +452,13 @@ async def fetch_alpaca_snapshots_batch() -> dict:
     """Fetch all stock snapshots from Alpaca in one API call. Returns {sym: quote}."""
     if not ALPACA_KEY or not ALPACA_SECRET:
         return {}
+    # Alpaca doesn't accept symbols with hyphens (e.g. BRK-B) in the snapshot endpoint
+    alpaca_syms = [s for s in SYMBOLS if "-" not in s]
     try:
         r = await http_client.get(
             f"{ALPACA_DATA_BASE}/stocks/snapshots",
             headers=_alpaca_headers(),
-            params={"symbols": ",".join(SYMBOLS), "feed": "iex"},
+            params={"symbols": ",".join(alpaca_syms), "feed": "iex"},
         )
         if r.status_code != 200:
             log.warning("Alpaca snapshots HTTP %s", r.status_code)
@@ -728,3 +730,9 @@ if frontend_dist.exists():
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         return FileResponse(str(frontend_dist / "index.html"))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
