@@ -87,6 +87,16 @@ function StockCard({ stock, sentiment }) {
         ))}
       </div>
 
+      {/* AI reasoning */}
+      {stock.reason && (
+        <div style={{
+          fontSize: 11, color: 'var(--muted)', lineHeight: 1.7, marginBottom: 10,
+          display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+        }}>
+          {stock.reason}
+        </div>
+      )}
+
       {/* News sentiment badge */}
       {sentiment && (() => {
         const s = SENTIMENT_STYLE[sentiment]
@@ -102,16 +112,14 @@ function StockCard({ stock, sentiment }) {
         )
       })()}
 
-      {/* Fundamentals row */}
+      {/* Fundamentals — always 3 columns; shows — while yfinance loads */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
         {[
-          ['P/E', stock.pe ? stock.pe.toFixed(1) + 'x' : '—'],
-          ['52W', w52pct || '—'],
-          ['CAP', formatMktCap(stock.market_cap)],
+          ['P/E',  stock.pe         ? stock.pe.toFixed(1) + 'x' : '—'],
+          ['52W',  w52pct           || '—'],
+          ['CAP',  formatMktCap(stock.market_cap)],
         ].map(([label, val]) => (
-          <div key={label} style={{
-            background: 'var(--surface2)', borderRadius: 5, padding: '5px 7px', fontSize: 10,
-          }}>
+          <div key={label} style={{ background: 'var(--surface2)', borderRadius: 5, padding: '5px 7px', fontSize: 10 }}>
             <div style={{ color: 'var(--muted)', marginBottom: 2 }}>{label}</div>
             <div style={{ fontWeight: 500 }}>{val}</div>
           </div>
